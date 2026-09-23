@@ -609,6 +609,7 @@ verify_failover() {
     local pubkey="$1"
     local expected_ip="$2"
     local expected_name="$3"
+    local vote_pubkey="$4"
 
     log_step "Verifying failover"
     log_info "Waiting 10 seconds for gossip propagation..."
@@ -619,13 +620,50 @@ verify_failover() {
 
     if [[ -z "$gossip_ip" ]]; then
         log_warn "Pubkey not yet visible in gossip - may need more time to propagate"
-        return 0
-    fi
-
-    if [[ "$gossip_ip" == "$expected_ip" ]]; then
+    elif [[ "$gossip_ip" == "$expected_ip" ]]; then
         log_success "Verified: identity is now on ${expected_name} (${expected_ip})"
     else
         log_warn "Gossip shows IP ${gossip_ip} but expected ${expected_ip} - may need more time"
+    fi
+
+    # This script cannot verify beforehand that --vote-account and
+    # --authorized-voter are configured correctly on ${expected_name} (see
+    # README) - that's the operator's responsibility. What it CAN do is
+    # check, after the fact, whether votes are actually landing on the
+    # vote account under the new identity: a validator with a wrong
+    # --vote-account or --authorized-voter simply cannot produce them, so a
+    # recent (processed, not necessarily confirmed/rooted) vote is real
+    # evidence both were set up correctly. A stale one is a real warning
+    # sign, even though the identity switch itself already succeeded.
+    log_info "Checking for recent votes from ${vote_pubkey:0:8}..."
+    local vote_json
+    if ! vote_json=$(solana_query vote-account "$vote_pubkey" --output json-compact); then
+        log_warn "Could not query vote account to confirm voting activity"
+        return 0
+    fi
+    local current_slot
+    if ! current_slot=$(solana_query slot); then
+        log_warn "Could not determine current slot to confirm voting activity"
+        return 0
+    fi
+
+    # NOTE: "lastVote" is a field of `solana validators`, not `vote-account`
+    # (which has no top-level lastVote key). `vote-account`'s equivalent is
+    # recentTimestamp.slot - the slot of its most recent vote.
+    local last_vote
+    last_vote=$(echo "$vote_json" | grep -oE '"recentTimestamp":\{"slot":[0-9]+' | grep -oE '[0-9]+' || true)
+    if [[ -z "$last_vote" ]]; then
+        log_warn "Could not determine last vote slot - cannot confirm voting activity"
+        return 0
+    fi
+
+    local vote_age=$((current_slot - last_vote))
+    local vote_freshness_slots=150 # ~30s @ 200ms/slot - generous margin
+    if [[ "$vote_age" -le "$vote_freshness_slots" ]]; then
+        log_success "${expected_name} is casting votes (last vote ${vote_age} slots ago)"
+    else
+        log_warn "${expected_name}'s last vote was ${vote_age} slots ago - not yet confirmed voting"
+        log_warn "Check --vote-account and --authorized-voter are configured correctly on ${expected_name}"
     fi
 }
 
@@ -720,7 +758,7 @@ transfer_tower "$SPARE_IP" "$PUBKEY" || exit 1
 unjunk_remote "$SPARE_IP" "$SPARE_CLIENT" "$SPARE_BINARY" || exit 1
 
 # Phase E: Verify
-verify_failover "$PUBKEY" "$SPARE_IP" "$SPARE_NAME"
+verify_failover "$PUBKEY" "$SPARE_IP" "$SPARE_NAME" "$VOTE_PUBKEY"
 
 echo ""
 echo -e "${GREEN}${BOLD}=== Failover complete ===${NC}"
