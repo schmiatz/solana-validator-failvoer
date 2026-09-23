@@ -14,7 +14,7 @@ It is meant to be deployed identically on both nodes of an active/spare pair (wi
    - Deactivates this node (symlinks its identity to a junk keypair, sets identity).
    - Copies the tower file to the spare.
    - Activates the spare (symlinks its identity to the staked keypair, sets identity).
-   - Verifies the identity is now visible on the spare via gossip.
+   - Verifies the identity is now visible on the spare via gossip, then checks whether the vote account has cast a recent (processed) vote under the new identity — see [Limitations](#limitations) for why this matters and what it can't catch beforehand.
 
 ## Requirements
 
@@ -30,6 +30,15 @@ It is meant to be deployed identically on both nodes of an active/spare pair (wi
   where `--identity` points at the same path this script manages as `SELF_IDENTITY_KEYPAIR` / `SPARE_IDENTITY_KEYPAIR`.
 - This script assumes the staked identity keypair already exists as a file on the spare node (`SPARE_STAKED_KEYPAIR`) and on this host (`SELF_STAKED_KEYPAIR`). It works by symlinking to these files, so a keyless setup (no keypair files on disk, authorized voter registered at runtime) is not supported.
 - `SELF_STAKED_KEYPAIR`, `SELF_JUNK_KEYPAIR`, and `SPARE_STAKED_KEYPAIR` must be readable keypair files (`solana address -k <file>` is used to derive their pubkeys — this is part of the `solana` CLI, not the separate `solana-keygen` tool, so it works on firedancer/fdctl-only hosts too). `SPARE_STAKED_KEYPAIR` is checked this way over SSH, so `solana` must also be reachable there.
+
+## Limitations
+
+**This script cannot verify, before failing over, that `--vote-account` and `--authorized-voter` are actually configured correctly on the node it's failing over to.** It's the operator's responsibility to get these right:
+
+- **`--vote-account`** (or an equivalent vote keypair) is fixed for the life of the validator process — it cannot be changed while the validator is running. You must make sure the validator was actually *started* pointing at the correct vote account on both nodes. There is no reliable way for this script to verify this from the outside without trusting a config file, which doesn't prove what the running process actually loaded — so it doesn't try.
+- **`--authorized-voter`** *can* be changed on a running validator without a restart: on agave, at runtime; on firedancer, via `firedancer add-authorized-voter`. This is *not* supported on Frankendancer (the firedancer-networking/agave-execution hybrid setup) — there, it must be set at launch, same as `--vote-account`. Either way, this script does not check or set it.
+- If either is wrong on the node you're failing over to, the identity switch itself will still succeed (this script only manages the identity symlink and calls `set-identity`), but the validator will not actually vote afterward.
+- The post-failover step does check whether the vote account has produced a recent (processed, not necessarily confirmed/rooted) vote under the new identity — since a validator with either misconfigured simply cannot produce one, this is real evidence they were both set up correctly. A stale vote there is a genuine warning sign, but this check only runs *after* the failover has already happened; it cannot prevent or undo a bad one.
 
 ## Configuration
 
