@@ -27,7 +27,11 @@ SLOT_TIME_MS=200
 # slot (fd/firedancer safety wait; agave uses wait-for-restart-window instead).
 SAFE_WINDOW_MINUTES=2
 
-PUBKEY="YOUR_VALIDATOR_IDENTITY_PUBKEY"
+# This validator's vote account pubkey. The actual identity pubkey (PUBKEY)
+# is NOT configured directly - it's derived from this at startup by looking
+# up the vote account's currently-recognized validator identity on chain,
+# then cross-checked against SELF_STAKED_KEYPAIR/SELF_JUNK_KEYPAIR below.
+VOTE_PUBKEY="YOUR_VALIDATOR_VOTE_PUBKEY"
 
 # CLIENT values: fd (fdctl), agave (agave-validator), firedancer (firedancer binary)
 # SELF describes this host (wherever this script is deployed). SPARE describes
@@ -46,6 +50,7 @@ SELF_LEDGER_DIR="/path/to/self/ledger"
 # used here since SELF_CLIENT is "agave" in this example.
 # SELF_FD_CONFIG="/path/to/self/firedancer-config.toml"
 SELF_JUNK_KEYPAIR="/path/to/self/junk-identity-keypair.json"
+SELF_STAKED_KEYPAIR="/path/to/self/staked-identity-keypair.json"
 SELF_IDENTITY_KEYPAIR="/path/to/self/identity-keypair.json"
 
 SPARE_NAME="spare-validator-name"
@@ -201,6 +206,65 @@ check_target_health() {
     fi
 }
 
+derive_and_verify_identity() {
+    # Derives the validator identity pubkey from the chain (via VOTE_PUBKEY's
+    # currently-recognized validator identity) rather than trusting a
+    # hardcoded config value, then cross-checks it against the local keypair
+    # files: SELF_STAKED_KEYPAIR must match it, SELF_JUNK_KEYPAIR must not.
+    # Prints the derived pubkey on stdout on success.
+    local vote_pubkey="$1"
+
+    log_info "Deriving validator identity from vote account ${vote_pubkey:0:8}..."
+    local vote_json
+    if ! vote_json=$(solana_query vote-account "$vote_pubkey" --output json-compact); then
+        log_error "Failed to query vote account ${vote_pubkey}"
+        return 1
+    fi
+
+    local chain_pubkey
+    chain_pubkey=$(echo "$vote_json" | grep -oE '"validatorIdentity":"[^"]+"' | cut -d'"' -f4 || true)
+    if [[ -z "$chain_pubkey" ]]; then
+        log_error "Could not parse validatorIdentity from vote-account output"
+        return 1
+    fi
+    log_success "Chain reports current validator identity: ${chain_pubkey}"
+
+    # Local calls run plain (no bash -ic): PATH is already inherited from
+    # the interactive shell this script itself was launched from, and
+    # bash -ic here risks the process getting SIGTTIN/SIGTTOU-stopped by
+    # the terminal (nested interactive bash fighting for job control while
+    # not the foreground process of its pipeline). That's only a real
+    # problem over SSH (a fresh, non-interactive session - see run_ssh
+    # call sites), never for local invocations here.
+    local staked_pubkey
+    staked_pubkey=$(solana address -k "$SELF_STAKED_KEYPAIR" 2>/dev/null | tr -d '\r' || true)
+    if [[ -z "$staked_pubkey" ]]; then
+        log_error "Could not read pubkey from SELF_STAKED_KEYPAIR (${SELF_STAKED_KEYPAIR})"
+        return 1
+    fi
+
+    local junk_pubkey
+    junk_pubkey=$(solana address -k "$SELF_JUNK_KEYPAIR" 2>/dev/null | tr -d '\r' || true)
+    if [[ -z "$junk_pubkey" ]]; then
+        log_error "Could not read pubkey from SELF_JUNK_KEYPAIR (${SELF_JUNK_KEYPAIR})"
+        return 1
+    fi
+
+    if [[ "$staked_pubkey" != "$chain_pubkey" ]]; then
+        log_error "SELF_STAKED_KEYPAIR (${staked_pubkey}) does not match the chain-derived identity (${chain_pubkey})"
+        log_error "Check SELF_STAKED_KEYPAIR and VOTE_PUBKEY are configured correctly for this pair"
+        return 1
+    fi
+
+    if [[ "$junk_pubkey" == "$chain_pubkey" ]]; then
+        log_error "SELF_JUNK_KEYPAIR (${junk_pubkey}) matches the staked identity - this must never be the case"
+        return 1
+    fi
+
+    log_success "SELF_STAKED_KEYPAIR matches chain identity, SELF_JUNK_KEYPAIR correctly does not"
+    echo "$chain_pubkey"
+}
+
 check_required_files() {
     local pubkey="$1"
     log_info "Checking required files and paths exist..."
@@ -251,6 +315,19 @@ check_required_files() {
     if ! run_ssh "$SPARE_IP" "test -f ${SPARE_STAKED_KEYPAIR}"; then
         log_error "Missing file on ${SPARE_NAME}: ${SPARE_STAKED_KEYPAIR}"
         ok=false
+    else
+        # bash -ic: a plain SSH command doesn't source .bashrc, where PATH
+        # is typically set up for solana - same reasoning as
+        # discover_binary_remote.
+        local spare_staked_pubkey
+        spare_staked_pubkey=$(run_ssh "$SPARE_IP" "bash -ic 'solana address -k ${SPARE_STAKED_KEYPAIR}'" 2>/dev/null | tr -d '\r' || true)
+        if [[ -z "$spare_staked_pubkey" ]]; then
+            log_error "Could not read pubkey from SPARE_STAKED_KEYPAIR on ${SPARE_NAME} (${SPARE_STAKED_KEYPAIR})"
+            ok=false
+        elif [[ "$spare_staked_pubkey" != "$pubkey" ]]; then
+            log_error "SPARE_STAKED_KEYPAIR on ${SPARE_NAME} (${spare_staked_pubkey}) does not match the chain-derived identity (${pubkey})"
+            ok=false
+        fi
     fi
 
     local spare_identity_dir
@@ -275,8 +352,10 @@ discover_binary_local() {
         firedancer) binary_name="firedancer" ;;
         *)          log_error "Unknown client type: $client"; return 1 ;;
     esac
+    # Plain invocation, no bash -ic - see the comment in
+    # derive_and_verify_identity for why that's risky for local calls.
     local path
-    path=$(bash -ic "which $binary_name 2>/dev/null; exit" 2>/dev/null | grep -E '^/' | tail -1 | tr -d '\r' || true)
+    path=$(which "$binary_name" 2>/dev/null | tr -d '\r' || true)
     if [[ -z "$path" ]]; then
         log_error "Could not find $binary_name locally"
         return 1
@@ -563,6 +642,11 @@ fi
 log_step "Local host"
 log_success "Running on: ${SELF_NAME} (${SELF_IP}) [${SELF_CLIENT}]"
 log_info "Spare node:  ${SPARE_NAME} (${SPARE_IP}) [${SPARE_CLIENT}]"
+
+# Derive and verify validator identity against chain before doing anything else
+echo ""
+log_step "Deriving and verifying validator identity"
+PUBKEY=$(derive_and_verify_identity "$VOTE_PUBKEY") || exit 1
 
 # Detect active node
 echo ""
