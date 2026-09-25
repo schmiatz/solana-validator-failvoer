@@ -4,6 +4,8 @@ A script to fail over a Solana validator's staked identity **away from the curre
 
 It is meant to be deployed identically on both nodes of an active/spare pair (with the `SELF_*`/`SPARE_*` config swapped between the two copies). You always run it on whichever node currently holds the staked identity — it detects this itself via gossip and refuses to run on the spare. Since roles flip after every failover, the same two script copies are used to fail over back and forth indefinitely; which node is "active" is never hardcoded, only which physical host each copy runs on.
 
+Works with both classic TowerBFT consensus and Alpenglow — which one the cluster is on is detected automatically from live chain data (see step 5 below), not a manual setting, so the same script keeps working correctly if/when a cluster activates Alpenglow.
+
 ## What it does
 
 1. Derives the validator identity pubkey from chain: looks up `VOTE_PUBKEY`'s currently-recognized validator identity, then verifies `SELF_STAKED_KEYPAIR` actually matches it and `SELF_JUNK_KEYPAIR` does not — catching a keypair/config mistake before touching anything. The identity isn't hardcoded anywhere; it's derived fresh each run.
@@ -12,7 +14,7 @@ It is meant to be deployed identically on both nodes of an active/spare pair (wi
 4. Waits for a safe moment to switch identity — either the client's own restart-window check (agave) or a manual leader-schedule check (fd/firedancer) — so the switch doesn't happen mid-leader-slot.
 5. Asks for confirmation, then:
    - Deactivates this node (symlinks its identity to a junk keypair, sets identity).
-   - Copies the tower file to the spare.
+   - Copies the consensus state file to the spare — `tower-1_9-<pubkey>.bin` on TowerBFT, or `vote_history-<pubkey>.bin` on Alpenglow. Which one is determined automatically from the vote account's own on-chain JSON shape (present in the same `vote-account` query already used to derive the identity), not a config setting, so it stays correct even if the cluster activates Alpenglow between runs.
    - Activates the spare (symlinks its identity to the staked keypair, sets identity).
    - Verifies the identity is now visible on the spare via gossip, then checks whether the vote account has cast a recent (processed) vote under the new identity — see [Limitations](#limitations) for why this matters and what it can't catch beforehand.
 
@@ -55,7 +57,7 @@ All configuration lives in the `CONFIG` section near the top of the script. Edit
 | `SELF_IP` | This host's IP. Used to detect whether this host is currently active (compared against gossip). Never changes, regardless of active/spare role. |
 | `SELF_CLIENT` | This host's validator client: `fd`, `agave`, or `firedancer`. |
 | `SELF_RPC_PORT` | This host's local RPC port. |
-| `SELF_LEDGER_DIR` | This host's validator ledger directory — passed as the `-l` flag to `wait-for-restart-window`/`set-identity` (agave), and used to locate the tower file to transfer. Checked to exist during pre-flight. |
+| `SELF_LEDGER_DIR` | This host's validator ledger directory — passed as the `-l` flag to `wait-for-restart-window`/`set-identity` (agave), and used to locate the consensus state file (tower or vote-history, auto-detected) to transfer. Checked to exist during pre-flight. |
 | `SELF_FD_CONFIG` | This host's firedancer `config.toml` path. Only needed if `SELF_CLIENT` is `fd`/`firedancer` — leave commented out otherwise (the example has it commented out since it uses `agave`). |
 | `SELF_JUNK_KEYPAIR` | Full path to the junk (unstaked) keypair used to deactivate this host. Verified at startup to *not* match the chain-derived identity. |
 | `SELF_STAKED_KEYPAIR` | Full path to this host's own staked keypair. Verified at startup to match the chain-derived identity — this is how the identity pubkey is confirmed correct before anything else runs. |
@@ -64,7 +66,7 @@ All configuration lives in the `CONFIG` section near the top of the script. Edit
 | `SPARE_IP` | The spare node's IP. Never changes, regardless of active/spare role. |
 | `SPARE_RPC_PORT` | The spare node's RPC port (checked over SSH for health). |
 | `SPARE_CLIENT` | The spare node's validator client: `fd`, `agave`, or `firedancer`. |
-| `SPARE_LEDGER_DIR` | The spare node's validator ledger directory — passed as the `-l` flag to `set-identity` (agave), and the destination for the transferred tower file. Checked to exist during pre-flight. |
+| `SPARE_LEDGER_DIR` | The spare node's validator ledger directory — passed as the `-l` flag to `set-identity` (agave), and the destination for the transferred consensus state file (tower or vote-history, auto-detected). Checked to exist during pre-flight. |
 | `SPARE_FD_CONFIG` | The spare node's firedancer `config.toml` path. Only needed if `SPARE_CLIENT` is `fd`/`firedancer` — leave commented out otherwise (the example has it commented out since it uses `agave`). |
 | `SPARE_STAKED_KEYPAIR` | Full path to the staked keypair used to activate the spare. Checked during pre-flight (over SSH) to confirm its pubkey also matches the chain-derived identity. |
 | `SPARE_IDENTITY_KEYPAIR` | Full path to the symlink the spare's validator process reads its identity from. |
