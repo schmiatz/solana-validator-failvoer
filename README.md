@@ -16,7 +16,7 @@ Assumes Alpenglow consensus is active on the cluster: the consensus state file t
    - Deactivates this node (symlinks its identity to a junk keypair, sets identity).
    - Copies the vote history file (`vote_history-<pubkey>.bin`) to the spare.
    - Activates the spare (symlinks its identity to the staked keypair, sets identity).
-   - Verifies the identity is now visible on the spare via gossip, then checks whether the vote account has cast a recent (processed) vote under the new identity — see [Limitations](#limitations) for why this matters and what it can't catch beforehand.
+   - Verifies the identity is now visible on the spare via gossip, then waits (up to `VOTE_CONFIRM_TIMEOUT_SECONDS`) for the vote account to vote on a slot later than the one recorded right after the spare was activated — only the spare can have produced such a vote, since this node was already junked by then — see [Limitations](#limitations) for why this matters and what it can't catch beforehand.
 
 ## Requirements
 
@@ -52,6 +52,7 @@ All configuration lives in the `CONFIG` section near the top of the script. Edit
 | `SSH_USER` | SSH user used to reach the spare node. |
 | `SLOT_TIME_MS` | Current network slot time in milliseconds. Used to convert `SAFE_WINDOW_MINUTES` into a slot count for the firedancer leader-slot check. |
 | `SAFE_WINDOW_MINUTES` | Minutes before failover during which this validator must have no leader slot (firedancer). For agave, passed as `--min-idle-time` to `wait-for-restart-window`. |
+| `VOTE_CONFIRM_TIMEOUT_SECONDS` | How long to wait after failover for a vote from the newly active node (on a slot after its activation) before warning that it isn't voting. Default `60`. |
 | `VOTE_PUBKEY` | This validator's vote account pubkey. The identity pubkey being failed over is *not* configured directly — it's derived at startup from this vote account's currently-recognized validator identity on chain (`solana vote-account`), then cross-checked against `SELF_STAKED_KEYPAIR`/`SELF_JUNK_KEYPAIR`. |
 | `SELF_NAME` | Human-readable name for this host, used in log output. |
 | `SELF_IP` | This host's IP. Used to detect whether this host is currently active (compared against gossip). Never changes, regardless of active/spare role. |

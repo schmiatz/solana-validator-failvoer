@@ -26,6 +26,9 @@ SLOT_TIME_MS=200
 # Minutes before failover during which this validator must have no leader
 # slot (firedancer safety wait; agave uses wait-for-restart-window instead).
 SAFE_WINDOW_MINUTES=2
+# How long to wait after failover for the first vote from the newly active
+# node before warning that it isn't voting.
+VOTE_CONFIRM_TIMEOUT_SECONDS=60
 
 # This validator's vote account pubkey. The actual identity pubkey (PUBKEY)
 # is NOT configured directly - it's derived from this at startup by looking
@@ -139,6 +142,16 @@ case "$CLUSTER" in
         ;;
 esac
 
+for client_var in SELF_CLIENT SPARE_CLIENT; do
+    case "${!client_var}" in
+        agave|firedancer) ;;
+        *)
+            log_error "Unknown ${client_var}: '${!client_var}' (expected 'agave' or 'firedancer')"
+            exit 1
+            ;;
+    esac
+done
+
 #############################
 ### HELPER FUNCTIONS ########
 #############################
@@ -154,6 +167,9 @@ run_scp() {
     local dst="$2"
     scp -o ConnectTimeout=10 -P "$SSH_PORT" "$src" "$dst"
 }
+
+# Shell-quotes a value for safe use inside a remote command string.
+q() { printf '%q' "$1"; }
 
 solana_query() {
     # Runs `solana "$@" -u <url>` against the local RPC, falling back to
@@ -301,19 +317,19 @@ check_required_files() {
         ok=false
     fi
 
-    if ! run_ssh "$SPARE_IP" "test -d ${SPARE_LEDGER_DIR}"; then
+    if ! run_ssh "$SPARE_IP" "test -d $(q "$SPARE_LEDGER_DIR")"; then
         log_error "Missing directory on ${SPARE_NAME}: ${SPARE_LEDGER_DIR}"
         ok=false
     fi
 
     if [[ "$SPARE_CLIENT" == "firedancer" ]]; then
-        if ! run_ssh "$SPARE_IP" "test -f ${SPARE_FD_CONFIG}"; then
+        if ! run_ssh "$SPARE_IP" "test -f $(q "$SPARE_FD_CONFIG")"; then
             log_error "Missing file on ${SPARE_NAME}: ${SPARE_FD_CONFIG}"
             ok=false
         fi
     fi
 
-    if ! run_ssh "$SPARE_IP" "test -f ${SPARE_STAKED_KEYPAIR}"; then
+    if ! run_ssh "$SPARE_IP" "test -f $(q "$SPARE_STAKED_KEYPAIR")"; then
         log_error "Missing file on ${SPARE_NAME}: ${SPARE_STAKED_KEYPAIR}"
         ok=false
     else
@@ -321,7 +337,7 @@ check_required_files() {
         # is typically set up for solana - same reasoning as
         # discover_binary_remote.
         local spare_staked_pubkey
-        spare_staked_pubkey=$(run_ssh "$SPARE_IP" "bash -ic 'solana address -k ${SPARE_STAKED_KEYPAIR}'" 2>/dev/null | tr -d '\r' || true)
+        spare_staked_pubkey=$(run_ssh "$SPARE_IP" "bash -ic 'solana address -k $(q "$SPARE_STAKED_KEYPAIR")'" 2>/dev/null | tr -d '\r' || true)
         if [[ -z "$spare_staked_pubkey" ]]; then
             log_error "Could not read pubkey from SPARE_STAKED_KEYPAIR on ${SPARE_NAME} (${SPARE_STAKED_KEYPAIR})"
             ok=false
@@ -333,7 +349,7 @@ check_required_files() {
 
     local spare_identity_dir
     spare_identity_dir=$(dirname -- "$SPARE_IDENTITY_KEYPAIR")
-    if ! run_ssh "$SPARE_IP" "test -d ${spare_identity_dir}"; then
+    if ! run_ssh "$SPARE_IP" "test -d $(q "$spare_identity_dir")"; then
         log_error "Missing directory on ${SPARE_NAME}: ${spare_identity_dir} (needed for SPARE_IDENTITY_KEYPAIR)"
         ok=false
     fi
@@ -490,7 +506,7 @@ check_leader_slots() {
         local matched_slot=""
         while read -r slot; do
             [[ -z "$slot" ]] && continue
-            if [[ "$slot" -gt "$current_slot" ]] && [[ "$slot" -lt "$target_threshold" ]]; then
+            if [[ "$slot" -ge "$current_slot" ]] && [[ "$slot" -lt "$target_threshold" ]]; then
                 found_match=true
                 matched_slot="$slot"
                 break
@@ -587,7 +603,7 @@ unjunk_remote() {
 
     # Symlink to staked identity
     log_info "Switching identity symlink to staked..."
-    run_ssh "$ip" "ln -sf ${SPARE_STAKED_KEYPAIR} ${SPARE_IDENTITY_KEYPAIR}" \
+    run_ssh "$ip" "ln -sf $(q "$SPARE_STAKED_KEYPAIR") $(q "$SPARE_IDENTITY_KEYPAIR")" \
         || { log_error "Failed to symlink staked identity on ${ip}"; return 1; }
     log_success "Symlink updated to staked identity"
 
@@ -595,11 +611,11 @@ unjunk_remote() {
     log_info "Setting validator identity to staked..."
     case "$client" in
         agave)
-            run_ssh "$ip" "$binary -l $SPARE_LEDGER_DIR set-identity ${SPARE_IDENTITY_KEYPAIR}" \
+            run_ssh "$ip" "$(q "$binary") -l $(q "$SPARE_LEDGER_DIR") set-identity $(q "$SPARE_IDENTITY_KEYPAIR")" \
                 || { log_error "set-identity failed on ${ip}"; return 1; }
             ;;
         firedancer)
-            run_ssh "$ip" "$binary set-identity --config $SPARE_FD_CONFIG --vote-history-file ${spare_vote_history_path} ${SPARE_IDENTITY_KEYPAIR}" \
+            run_ssh "$ip" "$(q "$binary") set-identity --config $(q "$SPARE_FD_CONFIG") --vote-history-file $(q "$spare_vote_history_path") $(q "$SPARE_IDENTITY_KEYPAIR")" \
                 || { log_error "set-identity failed on ${ip}"; return 1; }
             ;;
     esac
@@ -611,6 +627,7 @@ verify_failover() {
     local expected_ip="$2"
     local expected_name="$3"
     local vote_pubkey="$4"
+    local activation_slot="$5"
 
     log_step "Verifying failover"
     log_info "Waiting 10 seconds for gossip propagation..."
@@ -636,36 +653,42 @@ verify_failover() {
     # recent (processed, not necessarily confirmed/rooted) vote is real
     # evidence both were set up correctly. A stale one is a real warning
     # sign, even though the identity switch itself already succeeded.
-    log_info "Checking for recent votes from ${vote_pubkey:0:8}..."
-    local vote_json
-    if ! vote_json=$(solana_query vote-account "$vote_pubkey" --output json-compact); then
-        log_warn "Could not query vote account to confirm voting activity"
-        return 0
-    fi
-    local current_slot
-    if ! current_slot=$(solana_query slot); then
-        log_warn "Could not determine current slot to confirm voting activity"
-        return 0
-    fi
-
-    # NOTE: "lastVote" is a field of `solana validators`, not `vote-account`
-    # (which has no top-level lastVote key). `vote-account`'s equivalent is
-    # recentTimestamp.slot - the slot of its most recent vote.
-    local last_vote
-    last_vote=$(echo "$vote_json" | grep -oE '"recentTimestamp":\{"slot":[0-9]+' | grep -oE '[0-9]+' || true)
-    if [[ -z "$last_vote" ]]; then
-        log_warn "Could not determine last vote slot - cannot confirm voting activity"
+    #
+    # Both nodes vote on the same vote account, so "a recent vote" alone
+    # can't tell them apart - the old node's last votes are only seconds old
+    # at this point. Instead, only a vote for a slot AFTER activation_slot
+    # (recorded right after the spare's set-identity returned, by which time
+    # this node was already junked) counts: the old node can't have voted
+    # on a slot that late.
+    if [[ -z "$activation_slot" ]]; then
+        log_warn "Activation slot unknown - cannot confirm ${expected_name} is voting"
         return 0
     fi
 
-    local vote_age=$((current_slot - last_vote))
-    local vote_freshness_slots=150 # ~30s @ 200ms/slot - generous margin
-    if [[ "$vote_age" -le "$vote_freshness_slots" ]]; then
-        log_success "${expected_name} is casting votes (last vote ${vote_age} slots ago)"
-    else
-        log_warn "${expected_name}'s last vote was ${vote_age} slots ago - not yet confirmed voting"
-        log_warn "Check --vote-account and --authorized-voter are configured correctly on ${expected_name}"
-    fi
+    log_info "Waiting for a vote from ${vote_pubkey:0:8} on a slot after ${activation_slot} (up to ${VOTE_CONFIRM_TIMEOUT_SECONDS}s)..."
+    local deadline=$((SECONDS + VOTE_CONFIRM_TIMEOUT_SECONDS))
+    local last_vote=""
+    while true; do
+        local vote_json
+        if vote_json=$(solana_query vote-account "$vote_pubkey" --output json-compact); then
+            # NOTE: "lastVote" is a field of `solana validators`, not
+            # `vote-account` (which has no top-level lastVote key).
+            # `vote-account`'s equivalent is recentTimestamp.slot - the slot
+            # of its most recent vote.
+            last_vote=$(echo "$vote_json" | grep -oE '"recentTimestamp":\{"slot":[0-9]+' | grep -oE '[0-9]+' || true)
+            if [[ -n "$last_vote" && "$last_vote" -gt "$activation_slot" ]]; then
+                log_success "${expected_name} is casting votes (voted on slot ${last_vote}, activated at slot ${activation_slot})"
+                return 0
+            fi
+        fi
+        if [[ "$SECONDS" -ge "$deadline" ]]; then
+            break
+        fi
+        sleep 2
+    done
+
+    log_warn "No vote on a slot after ${activation_slot} within ${VOTE_CONFIRM_TIMEOUT_SECONDS}s (last seen: '${last_vote}') - ${expected_name} not yet confirmed voting"
+    log_warn "Check --vote-account and --authorized-voter are configured correctly on ${expected_name}"
 }
 
 #############################
@@ -761,8 +784,11 @@ transfer_vote_history "$SPARE_IP" "$VOTE_HISTORY_FILENAME" || exit 1
 # Phase D: Unjunk the spare node
 unjunk_remote "$SPARE_IP" "$SPARE_CLIENT" "$SPARE_BINARY" "$VOTE_HISTORY_FILENAME" || exit 1
 
+# Any vote on a later slot than this can only have come from the spare
+ACTIVATION_SLOT=$(solana_query slot) || ACTIVATION_SLOT=""
+
 # Phase E: Verify
-verify_failover "$PUBKEY" "$SPARE_IP" "$SPARE_NAME" "$VOTE_PUBKEY"
+verify_failover "$PUBKEY" "$SPARE_IP" "$SPARE_NAME" "$VOTE_PUBKEY" "$ACTIVATION_SLOT"
 
 echo ""
 echo -e "${GREEN}${BOLD}=== Failover complete ===${NC}"
