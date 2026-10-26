@@ -265,33 +265,9 @@ derive_and_verify_identity() {
     echo "$chain_pubkey"
 }
 
-detect_tower_filename() {
-    # Whether a cluster has activated Alpenglow is visible in the vote
-    # account's own JSON: the CLI wraps recent votes under "votesObserved"
-    # regardless of consensus mode - the actual discriminator is which
-    # named sub-key it has: "Tower" (still classic consensus, even on a
-    # CLI version using this newer wrapper) vs "Alpenglow" (actually
-    # active). Derived from live chain data rather than a manual flag, so
-    # it self-adjusts if the cluster activates Alpenglow between runs.
-    local vote_pubkey="$1"
-    local pubkey="$2"
-
-    local vote_json
-    if ! vote_json=$(solana_query vote-account "$vote_pubkey" --output json-compact); then
-        log_error "Failed to query vote account to determine tower filename"
-        return 1
-    fi
-
-    if echo "$vote_json" | grep -q '"votesObserved":{"Alpenglow"'; then
-        echo "vote_history-${pubkey}.bin"
-    else
-        echo "tower-1_9-${pubkey}.bin"
-    fi
-}
-
 check_required_files() {
     local pubkey="$1"
-    local tower_filename="$2"
+    local vote_history_filename="$2"
     log_info "Checking required files and paths exist..."
     local ok=true
 
@@ -319,9 +295,9 @@ check_required_files() {
         ok=false
     fi
 
-    local tower_path="${SELF_LEDGER_DIR}/${tower_filename}"
-    if [[ ! -f "$tower_path" ]]; then
-        log_error "Missing local tower file: ${tower_path}"
+    local vote_history_path="${SELF_LEDGER_DIR}/${vote_history_filename}"
+    if [[ ! -f "$vote_history_path" ]]; then
+        log_error "Missing local vote history file: ${vote_history_path}"
         ok=false
     fi
 
@@ -585,18 +561,18 @@ junk_self() {
     log_success "Identity set to junk locally"
 }
 
-transfer_tower() {
+transfer_vote_history() {
     local to_ip="$1"
-    local tower_filename="$2"
+    local vote_history_filename="$2"
 
-    local self_tower_path="${SELF_LEDGER_DIR}/${tower_filename}"
-    local spare_tower_path="${SPARE_LEDGER_DIR}/${tower_filename}"
+    local self_vote_history_path="${SELF_LEDGER_DIR}/${vote_history_filename}"
+    local spare_vote_history_path="${SPARE_LEDGER_DIR}/${vote_history_filename}"
 
-    log_step "Transferring tower file"
-    log_info "Copying ${tower_filename} to ${to_ip}..."
-    run_scp "${self_tower_path}" "${SSH_USER}@${to_ip}:${spare_tower_path}" \
-        || { log_error "Tower file transfer failed"; return 1; }
-    log_success "Tower file transferred"
+    log_step "Transferring vote history file"
+    log_info "Copying ${vote_history_filename} to ${to_ip}..."
+    run_scp "${self_vote_history_path}" "${SSH_USER}@${to_ip}:${spare_vote_history_path}" \
+        || { log_error "Vote history file transfer failed"; return 1; }
+    log_success "Vote history file transferred"
 }
 
 unjunk_remote() {
@@ -708,8 +684,8 @@ echo ""
 log_step "Deriving and verifying validator identity"
 PUBKEY=$(derive_and_verify_identity "$VOTE_PUBKEY") || exit 1
 
-TOWER_FILENAME=$(detect_tower_filename "$VOTE_PUBKEY" "$PUBKEY") || exit 1
-log_info "Tower/vote-history file: ${TOWER_FILENAME}"
+VOTE_HISTORY_FILENAME="vote_history-${PUBKEY}.bin"
+log_info "Vote history file: ${VOTE_HISTORY_FILENAME}"
 
 # Detect active node
 echo ""
@@ -739,7 +715,7 @@ if ! check_target_health "$SPARE_IP" "$SPARE_NAME" "$SPARE_RPC_PORT"; then
     fi
 fi
 
-check_required_files "$PUBKEY" "$TOWER_FILENAME" || exit 1
+check_required_files "$PUBKEY" "$VOTE_HISTORY_FILENAME" || exit 1
 
 log_info "Discovering binary locally (${SELF_CLIENT})..."
 SELF_BINARY=$(discover_binary_local "$SELF_CLIENT") || exit 1
@@ -776,8 +752,8 @@ log_step "Starting failover"
 # Phase A+B: Junk this (active) node
 junk_self "$SELF_CLIENT" "$SELF_BINARY" "$PUBKEY" || exit 1
 
-# Phase C: Transfer tower
-transfer_tower "$SPARE_IP" "$TOWER_FILENAME" || exit 1
+# Phase C: Transfer vote history
+transfer_vote_history "$SPARE_IP" "$VOTE_HISTORY_FILENAME" || exit 1
 
 # Phase D: Unjunk the spare node
 unjunk_remote "$SPARE_IP" "$SPARE_CLIENT" "$SPARE_BINARY" || exit 1
