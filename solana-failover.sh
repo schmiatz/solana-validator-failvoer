@@ -24,7 +24,7 @@ SSH_USER="your-ssh-user"
 
 SLOT_TIME_MS=200
 # Minutes before failover during which this validator must have no leader
-# slot (fd/firedancer safety wait; agave uses wait-for-restart-window instead).
+# slot (firedancer safety wait; agave uses wait-for-restart-window instead).
 SAFE_WINDOW_MINUTES=2
 
 # This validator's vote account pubkey. The actual identity pubkey (PUBKEY)
@@ -33,7 +33,7 @@ SAFE_WINDOW_MINUTES=2
 # then cross-checked against SELF_STAKED_KEYPAIR/SELF_JUNK_KEYPAIR below.
 VOTE_PUBKEY="YOUR_VALIDATOR_VOTE_PUBKEY"
 
-# CLIENT values: fd (fdctl), agave (agave-validator), firedancer (firedancer binary)
+# CLIENT values: agave (agave-validator), firedancer (firedancer binary)
 # SELF describes this host (wherever this script is deployed). SPARE describes
 # the other node in the pair. Roles (active/spare) are NOT tied to these -
 # whichever of the two currently holds the staked identity is "active", and
@@ -46,7 +46,7 @@ SELF_IP="0.0.0.0"
 SELF_CLIENT="agave"
 SELF_RPC_PORT=8899
 SELF_LEDGER_DIR="/path/to/self/ledger"
-# SELF_FD_CONFIG - only needed if SELF_CLIENT is "fd" or "firedancer". Not
+# SELF_FD_CONFIG - only needed if SELF_CLIENT is "firedancer". Not
 # used here since SELF_CLIENT is "agave" in this example.
 # SELF_FD_CONFIG="/path/to/self/firedancer-config.toml"
 SELF_JUNK_KEYPAIR="/path/to/self/junk-identity-keypair.json"
@@ -58,7 +58,7 @@ SPARE_IP="0.0.0.0"
 SPARE_RPC_PORT=8899
 SPARE_CLIENT="agave"
 SPARE_LEDGER_DIR="/path/to/spare/ledger"
-# SPARE_FD_CONFIG - only needed if SPARE_CLIENT is "fd" or "firedancer". Not
+# SPARE_FD_CONFIG - only needed if SPARE_CLIENT is "firedancer". Not
 # used here since SPARE_CLIENT is "agave" in this example.
 # SPARE_FD_CONFIG="/path/to/spare/firedancer-config.toml"
 SPARE_STAKED_KEYPAIR="/path/to/spare/staked-identity-keypair.json"
@@ -99,7 +99,7 @@ not active it exits immediately without making any changes.
 
 Options:
   --force     Skip safety checks that would otherwise block or wait for
-              the failover: the fd/firedancer leader-slot safety window,
+              the failover: the firedancer leader-slot safety window,
               the agave wait-for-restart-window, and the spare node's RPC
               health check. Warnings are still printed for anything that
               would normally block, but the failover proceeds anyway.
@@ -300,7 +300,7 @@ check_required_files() {
         ok=false
     fi
 
-    if [[ "$SELF_CLIENT" == "fd" || "$SELF_CLIENT" == "firedancer" ]]; then
+    if [[ "$SELF_CLIENT" == "firedancer" ]]; then
         if [[ ! -f "$SELF_FD_CONFIG" ]]; then
             log_error "Missing local file: ${SELF_FD_CONFIG}"
             ok=false
@@ -330,7 +330,7 @@ check_required_files() {
         ok=false
     fi
 
-    if [[ "$SPARE_CLIENT" == "fd" || "$SPARE_CLIENT" == "firedancer" ]]; then
+    if [[ "$SPARE_CLIENT" == "firedancer" ]]; then
         if ! run_ssh "$SPARE_IP" "test -f ${SPARE_FD_CONFIG}"; then
             log_error "Missing file on ${SPARE_NAME}: ${SPARE_FD_CONFIG}"
             ok=false
@@ -372,7 +372,6 @@ discover_binary_local() {
     local client="$1"
     local binary_name
     case "$client" in
-        fd)         binary_name="fdctl" ;;
         agave)      binary_name="agave-validator" ;;
         firedancer) binary_name="firedancer" ;;
         *)          log_error "Unknown client type: $client"; return 1 ;;
@@ -393,7 +392,6 @@ discover_binary_remote() {
     local client="$2"
     local binary_name
     case "$client" in
-        fd)         binary_name="fdctl" ;;
         agave)      binary_name="agave-validator" ;;
         firedancer) binary_name="firedancer" ;;
         *)          log_error "Unknown client type: $client"; return 1 ;;
@@ -560,7 +558,7 @@ junk_self() {
                     || { log_error "wait-for-restart-window failed"; return 1; }
             fi
             ;;
-        fd|firedancer)
+        firedancer)
             check_leader_slots "$pubkey" \
                 || { log_error "Leader-slot safety check failed"; return 1; }
             ;;
@@ -579,7 +577,7 @@ junk_self() {
             "$binary" -l "$SELF_LEDGER_DIR" set-identity "$SELF_IDENTITY_KEYPAIR" \
                 || { log_error "set-identity failed locally"; return 1; }
             ;;
-        fd|firedancer)
+        firedancer)
             "$binary" set-identity --config "$SELF_FD_CONFIG" "$SELF_IDENTITY_KEYPAIR" \
                 || { log_error "set-identity failed locally"; return 1; }
             ;;
@@ -621,7 +619,7 @@ unjunk_remote() {
             run_ssh "$ip" "$binary -l $SPARE_LEDGER_DIR set-identity ${SPARE_IDENTITY_KEYPAIR}" \
                 || { log_error "set-identity failed on ${ip}"; return 1; }
             ;;
-        fd|firedancer)
+        firedancer)
             run_ssh "$ip" "$binary set-identity --config $SPARE_FD_CONFIG ${SPARE_IDENTITY_KEYPAIR}" \
                 || { log_error "set-identity failed on ${ip}"; return 1; }
             ;;

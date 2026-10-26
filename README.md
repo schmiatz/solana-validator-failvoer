@@ -11,7 +11,7 @@ Works with both classic TowerBFT consensus and Alpenglow — which one the clust
 1. Derives the validator identity pubkey from chain: looks up `VOTE_PUBKEY`'s currently-recognized validator identity, then verifies `SELF_STAKED_KEYPAIR` actually matches it and `SELF_JUNK_KEYPAIR` does not — catching a keypair/config mistake before touching anything. The identity isn't hardcoded anywhere; it's derived fresh each run.
 2. Confirms this host is the one currently active for that identity (checked via `solana gossip`). If it isn't, it exits immediately without touching anything.
 3. Runs pre-flight checks: SSH reachability to the spare, the spare's RPC health, that all required directories/keypair/tower files actually exist on both nodes (including verifying `SPARE_STAKED_KEYPAIR`'s pubkey also matches the chain-derived identity, same as `SELF_STAKED_KEYPAIR`), and that the validator binary can be found on both sides.
-4. Waits for a safe moment to switch identity — either the client's own restart-window check (agave) or a manual leader-schedule check (fd/firedancer) — so the switch doesn't happen mid-leader-slot.
+4. Waits for a safe moment to switch identity — either the client's own restart-window check (agave) or a manual leader-schedule check (firedancer) — so the switch doesn't happen mid-leader-slot.
 5. Asks for confirmation, then:
    - Deactivates this node (symlinks its identity to a junk keypair, sets identity).
    - Copies the consensus state file to the spare — `tower-1_9-<pubkey>.bin` on TowerBFT, or `vote_history-<pubkey>.bin` on Alpenglow. Which one is determined automatically from the vote account's own on-chain JSON shape (present in the same `vote-account` query already used to derive the identity), not a config setting, so it stays correct even if the cluster activates Alpenglow between runs.
@@ -31,14 +31,14 @@ Works with both classic TowerBFT consensus and Alpenglow — which one the clust
   ```
   where `--identity` points at the same path this script manages as `SELF_IDENTITY_KEYPAIR` / `SPARE_IDENTITY_KEYPAIR`.
 - This script assumes the staked identity keypair already exists as a file on the spare node (`SPARE_STAKED_KEYPAIR`) and on this host (`SELF_STAKED_KEYPAIR`). It works by symlinking to these files, so a keyless setup (no keypair files on disk, authorized voter registered at runtime) is not supported.
-- `SELF_STAKED_KEYPAIR`, `SELF_JUNK_KEYPAIR`, and `SPARE_STAKED_KEYPAIR` must be readable keypair files (`solana address -k <file>` is used to derive their pubkeys — this is part of the `solana` CLI, not the separate `solana-keygen` tool, so it works on firedancer/fdctl-only hosts too). `SPARE_STAKED_KEYPAIR` is checked this way over SSH, so `solana` must also be reachable there.
+- `SELF_STAKED_KEYPAIR`, `SELF_JUNK_KEYPAIR`, and `SPARE_STAKED_KEYPAIR` must be readable keypair files (`solana address -k <file>` is used to derive their pubkeys — this is part of the `solana` CLI, not the separate `solana-keygen` tool, so it works on firedancer-only hosts too). `SPARE_STAKED_KEYPAIR` is checked this way over SSH, so `solana` must also be reachable there.
 
 ## Limitations
 
 **This script cannot verify, before failing over, that `--vote-account` and `--authorized-voter` are actually configured correctly on the node it's failing over to.** It's the operator's responsibility to get these right:
 
 - **`--vote-account`** (or an equivalent vote keypair) is fixed for the life of the validator process — it cannot be changed while the validator is running. You must make sure the validator was actually *started* pointing at the correct vote account on both nodes. There is no reliable way for this script to verify this from the outside without trusting a config file, which doesn't prove what the running process actually loaded — so it doesn't try.
-- **`--authorized-voter`** *can* be changed on a running validator without a restart: on agave, at runtime; on firedancer, via `firedancer add-authorized-voter`. This is *not* supported on Frankendancer (the firedancer-networking/agave-execution hybrid setup) — there, it must be set at launch, same as `--vote-account`. Either way, this script does not check or set it.
+- **`--authorized-voter`** *can* be changed on a running validator without a restart: on agave, at runtime; on firedancer, via `firedancer add-authorized-voter`. This script does not check or set it.
 - If either is wrong on the node you're failing over to, the identity switch itself will still succeed (this script only manages the identity symlink and calls `set-identity`), but the validator will not actually vote afterward.
 - The post-failover step does check whether the vote account has produced a recent (processed, not necessarily confirmed/rooted) vote under the new identity — since a validator with either misconfigured simply cannot produce one, this is real evidence they were both set up correctly. A stale vote there is a genuine warning sign, but this check only runs *after* the failover has already happened; it cannot prevent or undo a bad one.
 
@@ -50,24 +50,24 @@ All configuration lives in the `CONFIG` section near the top of the script. Edit
 |---|---|
 | `SSH_PORT` | SSH port used to reach the spare node. |
 | `SSH_USER` | SSH user used to reach the spare node. |
-| `SLOT_TIME_MS` | Current network slot time in milliseconds. Used to convert `SAFE_WINDOW_MINUTES` into a slot count for the fd/firedancer leader-slot check. |
-| `SAFE_WINDOW_MINUTES` | Minutes before failover during which this validator must have no leader slot (fd/firedancer). For agave, passed as `--min-idle-time` to `wait-for-restart-window`. |
+| `SLOT_TIME_MS` | Current network slot time in milliseconds. Used to convert `SAFE_WINDOW_MINUTES` into a slot count for the firedancer leader-slot check. |
+| `SAFE_WINDOW_MINUTES` | Minutes before failover during which this validator must have no leader slot (firedancer). For agave, passed as `--min-idle-time` to `wait-for-restart-window`. |
 | `VOTE_PUBKEY` | This validator's vote account pubkey. The identity pubkey being failed over is *not* configured directly — it's derived at startup from this vote account's currently-recognized validator identity on chain (`solana vote-account`), then cross-checked against `SELF_STAKED_KEYPAIR`/`SELF_JUNK_KEYPAIR`. |
 | `SELF_NAME` | Human-readable name for this host, used in log output. |
 | `SELF_IP` | This host's IP. Used to detect whether this host is currently active (compared against gossip). Never changes, regardless of active/spare role. |
-| `SELF_CLIENT` | This host's validator client: `fd`, `agave`, or `firedancer`. |
+| `SELF_CLIENT` | This host's validator client: `agave` or `firedancer`. |
 | `SELF_RPC_PORT` | This host's local RPC port. |
 | `SELF_LEDGER_DIR` | This host's validator ledger directory — passed as the `-l` flag to `wait-for-restart-window`/`set-identity` (agave), and used to locate the consensus state file (tower or vote-history, auto-detected) to transfer. Checked to exist during pre-flight. |
-| `SELF_FD_CONFIG` | This host's firedancer `config.toml` path. Only needed if `SELF_CLIENT` is `fd`/`firedancer` — leave commented out otherwise (the example has it commented out since it uses `agave`). |
+| `SELF_FD_CONFIG` | This host's firedancer `config.toml` path. Only needed if `SELF_CLIENT` is `firedancer` — leave commented out otherwise (the example has it commented out since it uses `agave`). |
 | `SELF_JUNK_KEYPAIR` | Full path to the junk (unstaked) keypair used to deactivate this host. Verified at startup to *not* match the chain-derived identity. |
 | `SELF_STAKED_KEYPAIR` | Full path to this host's own staked keypair. Verified at startup to match the chain-derived identity — this is how the identity pubkey is confirmed correct before anything else runs. |
 | `SELF_IDENTITY_KEYPAIR` | Full path to the symlink this host's validator process reads its identity from. |
 | `SPARE_NAME` | Human-readable name for the paired node. |
 | `SPARE_IP` | The spare node's IP. Never changes, regardless of active/spare role. |
 | `SPARE_RPC_PORT` | The spare node's RPC port (checked over SSH for health). |
-| `SPARE_CLIENT` | The spare node's validator client: `fd`, `agave`, or `firedancer`. |
+| `SPARE_CLIENT` | The spare node's validator client: `agave` or `firedancer`. |
 | `SPARE_LEDGER_DIR` | The spare node's validator ledger directory — passed as the `-l` flag to `set-identity` (agave), and the destination for the transferred consensus state file (tower or vote-history, auto-detected). Checked to exist during pre-flight. |
-| `SPARE_FD_CONFIG` | The spare node's firedancer `config.toml` path. Only needed if `SPARE_CLIENT` is `fd`/`firedancer` — leave commented out otherwise (the example has it commented out since it uses `agave`). |
+| `SPARE_FD_CONFIG` | The spare node's firedancer `config.toml` path. Only needed if `SPARE_CLIENT` is `firedancer` — leave commented out otherwise (the example has it commented out since it uses `agave`). |
 | `SPARE_STAKED_KEYPAIR` | Full path to the staked keypair used to activate the spare. Checked during pre-flight (over SSH) to confirm its pubkey also matches the chain-derived identity. |
 | `SPARE_IDENTITY_KEYPAIR` | Full path to the symlink the spare's validator process reads its identity from. |
 | `CLUSTER` | `mainnet` or `testnet`. Selects a public fallback RPC, used only if the local RPC can't answer a leader-schedule/epoch-info query (e.g. firedancer not implementing `getLeaderSchedule`). Must match the actual cluster this pair runs on. |
@@ -90,7 +90,7 @@ Options:
 
 - `-h`, `--help` — show usage and exit.
 - `--force` — skip safety checks that would otherwise block or wait for the failover. Each check that would normally block still prints a warning explaining why, then proceeds anyway instead of stopping. Specifically it skips:
-  - **fd/firedancer leader-slot safety window** — normally the script waits until this validator has no leader slot coming up within `SAFE_WINDOW_MINUTES`. With `--force`, it proceeds even if a leader slot is imminent.
+  - **firedancer leader-slot safety window** — normally the script waits until this validator has no leader slot coming up within `SAFE_WINDOW_MINUTES`. With `--force`, it proceeds even if a leader slot is imminent.
   - **agave's `wait-for-restart-window`** — normally the script waits for `agave-validator wait-for-restart-window` to confirm it's safe to restart. With `--force`, this wait is skipped entirely.
   - **Spare node's RPC health check** — normally the failover aborts if the spare's RPC doesn't report healthy. With `--force`, it proceeds anyway.
 
