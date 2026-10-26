@@ -66,7 +66,7 @@ All configuration lives in the `CONFIG` section near the top of the script. Edit
 | `SPARE_IP` | The spare node's IP. Never changes, regardless of active/spare role. |
 | `SPARE_RPC_PORT` | The spare node's RPC port (checked over SSH for health). |
 | `SPARE_CLIENT` | The spare node's validator client: `agave` or `firedancer`. |
-| `SPARE_LEDGER_DIR` | The spare node's validator ledger directory — passed as the `-l` flag to `set-identity` (agave), and the destination for the transferred vote history file (`vote_history-<pubkey>.bin`). Checked to exist during pre-flight. |
+| `SPARE_LEDGER_DIR` | The spare node's validator ledger directory — passed as the `-l` flag to `set-identity` (agave), and the destination for the transferred vote history file (`vote_history-<pubkey>.bin`), which is passed to `firedancer set-identity --vote-history-file` when the spare runs firedancer. Checked to exist during pre-flight. |
 | `SPARE_FD_CONFIG` | The spare node's firedancer `config.toml` path. Only needed if `SPARE_CLIENT` is `firedancer` — leave commented out otherwise (the example has it commented out since it uses `agave`). |
 | `SPARE_STAKED_KEYPAIR` | Full path to the staked keypair used to activate the spare. Checked during pre-flight (over SSH) to confirm its pubkey also matches the chain-derived identity. |
 | `SPARE_IDENTITY_KEYPAIR` | Full path to the symlink the spare's validator process reads its identity from. |

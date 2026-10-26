@@ -579,6 +579,9 @@ unjunk_remote() {
     local ip="$1"
     local client="$2"
     local binary="$3"
+    local vote_history_filename="$4"
+
+    local spare_vote_history_path="${SPARE_LEDGER_DIR}/${vote_history_filename}"
 
     log_step "Activating node at ${ip} [${client}]"
 
@@ -596,7 +599,7 @@ unjunk_remote() {
                 || { log_error "set-identity failed on ${ip}"; return 1; }
             ;;
         firedancer)
-            run_ssh "$ip" "$binary set-identity --config $SPARE_FD_CONFIG ${SPARE_IDENTITY_KEYPAIR}" \
+            run_ssh "$ip" "$binary set-identity --config $SPARE_FD_CONFIG --vote-history-file ${spare_vote_history_path} ${SPARE_IDENTITY_KEYPAIR}" \
                 || { log_error "set-identity failed on ${ip}"; return 1; }
             ;;
     esac
@@ -756,7 +759,7 @@ junk_self "$SELF_CLIENT" "$SELF_BINARY" "$PUBKEY" || exit 1
 transfer_vote_history "$SPARE_IP" "$VOTE_HISTORY_FILENAME" || exit 1
 
 # Phase D: Unjunk the spare node
-unjunk_remote "$SPARE_IP" "$SPARE_CLIENT" "$SPARE_BINARY" || exit 1
+unjunk_remote "$SPARE_IP" "$SPARE_CLIENT" "$SPARE_BINARY" "$VOTE_HISTORY_FILENAME" || exit 1
 
 # Phase E: Verify
 verify_failover "$PUBKEY" "$SPARE_IP" "$SPARE_NAME" "$VOTE_PUBKEY"
