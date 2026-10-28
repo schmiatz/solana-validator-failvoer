@@ -26,9 +26,6 @@ SLOT_TIME_MS=200
 # Minutes before failover during which this validator must have no leader
 # slot (firedancer safety wait; agave uses wait-for-restart-window instead).
 SAFE_WINDOW_MINUTES=2
-# How long to wait after failover for the first vote from the newly active
-# node before warning that it isn't voting.
-VOTE_CONFIRM_TIMEOUT_SECONDS=60
 
 # This validator's vote account pubkey. The actual identity pubkey (PUBKEY)
 # is NOT configured directly - it's derived from this at startup by looking
@@ -684,8 +681,8 @@ verify_failover() {
         return 0
     fi
 
-    log_info "Waiting for a vote from ${vote_pubkey:0:8} on a slot after ${activation_slot} (up to ${VOTE_CONFIRM_TIMEOUT_SECONDS}s)..."
-    local deadline=$((SECONDS + VOTE_CONFIRM_TIMEOUT_SECONDS))
+    log_info "Waiting for a vote from ${vote_pubkey:0:8} on a slot after ${activation_slot} (up to 5s)..."
+    local deadline=$((SECONDS + 5))
     local last_vote=""
     while true; do
         local vote_json
@@ -703,10 +700,10 @@ verify_failover() {
         if [[ "$SECONDS" -ge "$deadline" ]]; then
             break
         fi
-        sleep 2
+        sleep 1
     done
 
-    log_warn "No vote on a slot after ${activation_slot} within ${VOTE_CONFIRM_TIMEOUT_SECONDS}s (last seen: '${last_vote}') - ${expected_name} not yet confirmed voting"
+    log_warn "No vote on a slot after ${activation_slot} within 5s (last seen: '${last_vote}') - ${expected_name} not yet confirmed voting"
     log_warn "Check --vote-account and --authorized-voter are configured correctly on ${expected_name}"
 }
 
