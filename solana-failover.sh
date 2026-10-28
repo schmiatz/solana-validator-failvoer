@@ -585,7 +585,26 @@ transfer_vote_history() {
     local spare_vote_history_path="${SPARE_LEDGER_DIR}/${vote_history_filename}"
 
     log_step "Transferring vote history file"
-    log_info "Copying ${vote_history_filename} to ${to_ip}..."
+
+    # firedancer renames the outgoing identity's vote history to *.bin.bak
+    # when set-identity switches away from it (and back to *.bin when it
+    # switches back), so after junking, the final state lives in the .bak.
+    # Only accept it once the .bin is gone - that proves the rename came
+    # from this switch, not a stale .bak left by an earlier failover.
+    if [[ "$SELF_CLIENT" == "firedancer" ]]; then
+        local bak_path="${self_vote_history_path}.bak"
+        local deadline=$((SECONDS + 5))
+        until [[ ! -e "$self_vote_history_path" && -f "$bak_path" ]]; do
+            if [[ "$SECONDS" -ge "$deadline" ]]; then
+                log_error "firedancer did not move ${vote_history_filename} to ${vote_history_filename}.bak after set-identity"
+                return 1
+            fi
+            sleep 1
+        done
+        self_vote_history_path="$bak_path"
+    fi
+
+    log_info "Copying $(basename -- "$self_vote_history_path") to ${to_ip}:${spare_vote_history_path}..."
     run_scp "${self_vote_history_path}" "${SSH_USER}@${to_ip}:${spare_vote_history_path}" \
         || { log_error "Vote history file transfer failed"; return 1; }
     log_success "Vote history file transferred"

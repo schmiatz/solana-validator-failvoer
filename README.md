@@ -14,7 +14,7 @@ Assumes Alpenglow consensus is active on the cluster: the consensus state file t
 4. Waits for a safe moment to switch identity — either the client's own restart-window check (agave) or a manual leader-schedule check (firedancer) — so the switch doesn't happen mid-leader-slot.
 5. Asks for confirmation, then:
    - Deactivates this node (symlinks its identity to a junk keypair, sets identity).
-   - Copies the vote history file (`vote_history-<pubkey>.bin`) to the spare.
+   - Copies the vote history file (`vote_history-<pubkey>.bin`) to the spare. On firedancer, `set-identity` renames the outgoing identity's file to `vote_history-<pubkey>.bin.bak`, so when this node runs firedancer the `.bak` is what gets copied (still saved as `vote_history-<pubkey>.bin` on the spare).
    - Activates the spare (symlinks its identity to the staked keypair, sets identity).
    - Verifies the identity is now visible on the spare via gossip, then waits (up to `VOTE_CONFIRM_TIMEOUT_SECONDS`) for the vote account to vote on a slot later than the one recorded right after the spare was activated — only the spare can have produced such a vote, since this node was already junked by then — see [Limitations](#limitations) for why this matters and what it can't catch beforehand.
 
